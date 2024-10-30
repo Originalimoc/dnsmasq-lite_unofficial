@@ -1,0 +1,11 @@
+[package]
+name = "dnsmasq-lite"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+simple_dns = { version = "0.1", path = "../simple_dns" }
+chrono = "0.4"
+log = "0.4"
+env_logger = "0.11"
