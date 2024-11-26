@@ -65,7 +65,7 @@ fn main() {
 
 async fn run(config: Arc<RwLock<Config>>, lookup_caches: CacheSet) {
     let listen_port = config.read().await.port;
-    let listen_ipport = format!("0.0.0.0:{}", listen_port);
+    let listen_ipport = format!("[::]:{}", listen_port);
     let local_addr: SocketAddr = listen_ipport.parse().expect("Invalid listen address");
     let socket = Arc::new(UdpSocket::bind(&local_addr).await.expect("Failed to bind to address"));
     info!("Listening on {}", local_addr);
@@ -100,10 +100,10 @@ async fn run(config: Arc<RwLock<Config>>, lookup_caches: CacheSet) {
             let (is_a_blacklisted, is_aaaa_blacklisted, hosts_a_matches, hosts_aaaa_matches) = config.read().await.get_hosts(&query_name);
 
             #[allow(clippy::type_complexity)]
-            async fn handle_dns_response<T, F>(
+            async fn handle_dns_response_send<T, F, G>(
                 hosts_matches: &[trie::Ip],
-                ip_filter: F,
-                add_response: fn(Vec<u8>, Vec<T>, Ttl, Option<u16>) -> Vec<u8>,
+                ip_filter_add: F,
+                add_response: Option<G>,
                 buf: &[u8],
                 config: &Config,
                 socket: &UdpSocket,
@@ -111,32 +111,39 @@ async fn run(config: Arc<RwLock<Config>>, lookup_caches: CacheSet) {
             ) -> std::io::Result<()>
             where
                 F: Fn(&trie::Ip) -> Option<T>,
+                G: Fn(Vec<u8>, Vec<T>, Ttl, Option<u16>) -> Vec<u8>,
                 T: Copy,
             {
                 let ip_in_hosts: Vec<T> = hosts_matches.iter()
-                    .filter_map(ip_filter)
+                    .filter_map(ip_filter_add)
                     .collect();
             
-                if !ip_in_hosts.is_empty() {
-                    if let Some(response) = build_empty_response(buf) {
-                        let response = add_response(response, ip_in_hosts, Ttl::from_secs(config.local_ttl), None);
-                        if let Err(e) = socket.send_to(&response, dns_query_src).await {
-                            error!("Failed to send DNS response to {}: {}", dns_query_src, e);
-                            return Err(e);
-                        }
-                        return Ok(());
+                if let Some(response) = build_empty_response_rcode(buf, ResponseCode::NoError) {
+                    let response = if let Some(add_response) = add_response {
+                        add_response(response, ip_in_hosts, Ttl::from_secs(config.local_ttl), None)
                     } else {
-                        error!("Failed to build empty response");
-                        return Err(std::io::Error::new(std::io::ErrorKind::Other, "Failed to build empty response"));
+                        response
+                    };
+                    if let Err(e) = socket.send_to(&response, dns_query_src).await {
+                        error!("Failed to send DNS response to {}: {}", dns_query_src, e);
+                        return Err(e);
                     }
+                    Ok(())
+                } else {
+                    error!("Failed to build empty response");
+                    Err(std::io::Error::new(std::io::ErrorKind::Other, "Failed to build empty response"))
                 }
-                
-                Ok(())
             }
-            match query_type {
-                Rtype::A => {
-                    if !is_a_blacklisted && !hosts_a_matches.is_empty() {
-                        let result = handle_dns_response(
+            #[allow(clippy::type_complexity)]
+            if !hosts_a_matches.is_empty() || !hosts_aaaa_matches.is_empty() {
+                match query_type {
+                    Rtype::A => {
+                        let add_a_response = if hosts_a_matches.is_empty() || is_a_blacklisted {
+                            None
+                        } else {
+                            Some(add_a_response)
+                        };
+                        let result = handle_dns_response_send(
                             &hosts_a_matches,
                             |ip| if let IpAddr::V4(ipv4) = ip.inner() { Some(*ipv4) } else { None },
                             add_a_response,
@@ -146,11 +153,14 @@ async fn run(config: Arc<RwLock<Config>>, lookup_caches: CacheSet) {
                             dns_query_src,
                         ).await;
                         if result.is_ok() { return; };
-                    }
-                },
-                Rtype::AAAA => {
-                    if !is_aaaa_blacklisted && !hosts_aaaa_matches.is_empty() {
-                        let result = handle_dns_response(
+                    },
+                    Rtype::AAAA => {
+                        let add_aaaa_response = if hosts_aaaa_matches.is_empty() || is_aaaa_blacklisted {
+                            None
+                        } else {
+                            Some(add_aaaa_response)
+                        };
+                        let result = handle_dns_response_send(
                             &hosts_aaaa_matches,
                             |ip| if let IpAddr::V6(ipv6) = ip.inner() { Some(*ipv6) } else { None },
                             add_aaaa_response,
@@ -160,9 +170,9 @@ async fn run(config: Arc<RwLock<Config>>, lookup_caches: CacheSet) {
                             dns_query_src,
                         ).await;
                         if result.is_ok() { return; };
-                    }
-                },
-                _ => {},
+                    },
+                    _ => {},
+                }
             }
 
             let (response_type, response) = {
@@ -198,8 +208,8 @@ async fn run(config: Arc<RwLock<Config>>, lookup_caches: CacheSet) {
                         std::net::IpAddr::V4(v4addr) => Some(*v4addr),
                         _ => None,
                     }).collect::<Vec<Ipv4Addr>>(),
-                        cached_ipv4_expired,
-                        cached_ipv6.iter().filter_map(|ip| match ip.inner() {
+                    cached_ipv4_expired,
+                    cached_ipv6.iter().filter_map(|ip| match ip.inner() {
                         std::net::IpAddr::V6(v6addr) => Some(*v6addr),
                         _ => None,
                     }).collect::<Vec<Ipv6Addr>>(),
@@ -208,21 +218,21 @@ async fn run(config: Arc<RwLock<Config>>, lookup_caches: CacheSet) {
                 };
                 debug!("Lookup cache for {} result: A: {:?}, AAAA: {:?}", query_name, cached_ipv4, cached_ipv6);
                 if (is_a_blacklisted && query_type == Rtype::A) || (is_aaaa_blacklisted && query_type == Rtype::AAAA) {
-                    (ResponseType::Blocked, build_empty_response(&buf))
+                    (ResponseType::Blocked, build_empty_response_rcode(&buf, ResponseCode::NoError))
                 } else {
                     let resolver = get_resolver_for_server(&*config.read().await, &resolver_map, &query_name).await;
                     match resolver {
                         None => {
-                            (ResponseType::NoUpstream, build_empty_response(&buf))
+                            (ResponseType::NoUpstream, build_empty_response_rcode(&buf, ResponseCode::ServFail))
                         },
                         Some(resolver) => {
                             if (is_a_blacklisted || is_aaaa_blacklisted) && (query_type == Rtype::A || query_type == Rtype::AAAA || query_type == Rtype::CNAME) {
-                                let (cnames_resolved, ip_records_resolved, ttl) = match query_type {
+                                let (rcode, cnames_resolved, ip_records_resolved, ttl) = match query_type {
                                     Rtype::A | Rtype::AAAA=> resolve_cname_chain_a_aaaa(&resolver, &query_name, query_type).await,
                                     Rtype::CNAME => {
-                                        let cname_result = resolve_cname_depth_one(&resolver, &query_name).await;
-                                        cname_result.map(|(cnames, ttl)| (Some(cnames), None, ttl))
-                                            .unwrap_or((None, None, Ttl::from_secs(0)))
+                                        let (rcode, cname_result) = resolve_cname_depth_one(&resolver, &query_name).await;
+                                        cname_result.map(|(cnames, ttl)| (rcode, Some(cnames), None, ttl))
+                                            .unwrap_or((rcode, None, None, Ttl::from_secs(0)))
                                     },
                                     _ => unreachable!(),
                                 };
@@ -242,7 +252,7 @@ async fn run(config: Arc<RwLock<Config>>, lookup_caches: CacheSet) {
                                         }
                                     }
                                 }
-                                if let Some(empty_response) = build_empty_response(&buf) {
+                                if let Some(empty_response) = build_empty_response_rcode(&buf, rcode) {
                                     let (cname_only_response, last_cname_len) = if let Some(cnames) = cnames_resolved {
                                         add_cname_response(empty_response, cnames, ttl.min(max_ttl_for_client))
                                     } else {
@@ -272,44 +282,48 @@ async fn run(config: Arc<RwLock<Config>>, lookup_caches: CacheSet) {
                                     (ResponseType::Malformed, None)
                                 }
                             } else {
-                                let empty_response = build_empty_response(&buf);
-                                if let Some(empty_response) = empty_response {
+                                let empty_response_test = build_empty_response_rcode(&buf, ResponseCode::NoError);
+                                if empty_response_test.is_some() {
                                     match query_type {
                                         Rtype::A => {
                                             if cached_ipv4_actually_expired {
-                                                let upstream_result = resolv::resolve_a(&*config.read().await, &resolver_map, &query_name).await;
-                                                if let Some((resolved_ips, ttl)) = upstream_result.1 {
+                                                let (rcode, response_type, upstream_result) = resolv::resolve_a(&*config.read().await, &resolver_map, &query_name).await;
+                                                let empty_response = build_empty_response_rcode(&buf, rcode).expect("already tested");
+                                                if let Some((resolved_ips, ttl)) = upstream_result {
                                                     for resolved_ip in &resolved_ips {
                                                         let _ = insert_to_ipset(&config.read().await.ipset, &resolved_ip.to_string(), &query_name).await;
                                                         insert_to_cache(cache, &query_name, IpAddr::from(*resolved_ip), ttl, min_cache_ttl, max_cache_ttl).await;
                                                     }
-                                                    (upstream_result.0, Some(add_a_response(empty_response, resolved_ips, ttl.min(max_ttl_for_client), None)))
+                                                    (response_type, Some(add_a_response(empty_response, resolved_ips, ttl.min(max_ttl_for_client), None)))
                                                 } else {
-                                                    (upstream_result.0, None)
+                                                    (response_type, Some(empty_response))
                                                 }
                                             } else {
                                                 cache.lock().await.clear(max_stale_cache_ttl);
                                                 debug!("Cache found for {}: {:?}, smallest TTL: {}s", query_name, cached_ipv4, ttl_smallest);
                                                 let ttl = Ttl::from_secs(ttl_smallest.clamp(0, 604800).try_into().expect("always in range"));
+                                                let empty_response = build_empty_response_rcode(&buf, ResponseCode::NoError).expect("already tested");
                                                 (ResponseType::Cached, Some(add_a_response(empty_response, cached_ipv4, ttl.min(max_ttl_for_client), None)))
                                             }
                                         },
                                         Rtype::AAAA => {
                                             if cached_ipv6_actually_expired {
-                                                let upstream_result = resolv::resolve_aaaa(&*config.read().await, &resolver_map, &query_name).await;
-                                                if let Some((resolved_ips, ttl)) = upstream_result.1 {
+                                                let (rcode, response_type, upstream_result) = resolv::resolve_aaaa(&*config.read().await, &resolver_map, &query_name).await;
+                                                let empty_response = build_empty_response_rcode(&buf, rcode).expect("already tested");
+                                                if let Some((resolved_ips, ttl)) = upstream_result {
                                                     for resolved_ip in &resolved_ips {
                                                         let _ = insert_to_ipset(&config.read().await.ipset, &resolved_ip.to_string(), &query_name).await;
                                                         insert_to_cache(cache, &query_name, IpAddr::from(*resolved_ip), ttl, min_cache_ttl, max_cache_ttl).await;
                                                     }
-                                                    (upstream_result.0, Some(add_aaaa_response(empty_response, resolved_ips, ttl.min(max_ttl_for_client), None)))
+                                                    (response_type, Some(add_aaaa_response(empty_response, resolved_ips, ttl.min(max_ttl_for_client), None)))
                                                 } else {
-                                                    (upstream_result.0, None)
+                                                    (response_type, Some(empty_response))
                                                 }
                                             } else {
                                                 cache.lock().await.clear(max_stale_cache_ttl);
                                                 debug!("Cache found for {}: {:?}, smallest TTL: {}s", query_name, cached_ipv6, ttl_smallest);
                                                 let ttl = Ttl::from_secs(ttl_smallest.clamp(0, 604800).try_into().expect("always in range"));
+                                                let empty_response = build_empty_response_rcode(&buf, ResponseCode::NoError).expect("already tested");
                                                 (ResponseType::Cached, Some(add_aaaa_response(empty_response, cached_ipv6, ttl.min(max_ttl_for_client), None)))
                                             }
                                         },

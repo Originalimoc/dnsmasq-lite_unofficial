@@ -1,7 +1,7 @@
 use std::net::{SocketAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::time::Duration;
-use simple_dns::{ResponseType, forward_query, resolver::{new_resolver, StubResolver, resolve_a as simple_a_resolve, resolve_aaaa as simple_aaaa_resolve}};
+use simple_dns::{ResponseType, forward_query, ResponseCode, resolver::{new_resolver, StubResolver, resolve_a as simple_a_resolve, resolve_aaaa as simple_aaaa_resolve}};
 use crate::{Config, ResolverMap, DNS_TIMEOUT};
 
 pub async fn forward_query_to_upstream(
@@ -23,17 +23,17 @@ pub async fn resolve_a(
     config: &Config,
     resolver_map: &ResolverMap,
     query_name: &str,
-) -> (ResponseType, Option<(Vec<Ipv4Addr>, simple_dns::resolver::Ttl)>) {
+) -> (ResponseCode, ResponseType, Option<(Vec<Ipv4Addr>, simple_dns::resolver::Ttl)>) {
     match get_resolver_for_server(config, resolver_map, query_name).await {
         Some(resolver) => {
-            let result = simple_a_resolve(&resolver, query_name).await;
-            if result.is_none() {
-                (ResponseType::UpstreamErr, result)
+            let (rcode, result) = simple_a_resolve(&resolver, query_name).await;
+            (rcode, if result.is_none() {
+                ResponseType::UpstreamErr
             } else {
-                (ResponseType::Upstream, result)
-            }
+                ResponseType::Upstream
+            }, result)
         }
-        None => (ResponseType::NoUpstream, None),
+        None => (ResponseCode::ServFail, ResponseType::NoUpstream, None),
     }
 }
 
@@ -41,17 +41,17 @@ pub async fn resolve_aaaa(
     config: &Config,
     resolver_map: &ResolverMap,
     query_name: &str,
-) -> (ResponseType, Option<(Vec<Ipv6Addr>, simple_dns::resolver::Ttl)>) {
+) -> (ResponseCode, ResponseType, Option<(Vec<Ipv6Addr>, simple_dns::resolver::Ttl)>) {
     match get_resolver_for_server(config, resolver_map, query_name).await {
         Some(resolver) => {
-            let result = simple_aaaa_resolve(&resolver, query_name).await;
-            if result.is_none() {
-                (ResponseType::UpstreamErr, result)
+            let (rcode, result) = simple_aaaa_resolve(&resolver, query_name).await;
+            (rcode, if result.is_none() {
+                ResponseType::UpstreamErr
             } else {
-                (ResponseType::Upstream, result)
-            }
+                ResponseType::Upstream
+            }, result)
         }
-        None => (ResponseType::NoUpstream, None),
+        None => (ResponseCode::ServFail, ResponseType::NoUpstream, None),
     }
 }
 

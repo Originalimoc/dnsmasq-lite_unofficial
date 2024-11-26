@@ -60,6 +60,7 @@ impl Config {
 			reader.read_to_string(&mut config_contents)?;
 			
 			for line in config_contents.lines() {
+				// dbg!(line);
 				if line.trim().is_empty() || line.starts_with('#') {
 					continue;
 				}
@@ -291,8 +292,11 @@ impl Config {
 			let output = std::process::Command::new("ipset")
 				.arg("list")
 				.arg(ipset_name)
-				.output()?;
-	
+				.output();
+			if output.is_err() {
+				log::error!("ERROR: ipset rule set but command failed");
+			}
+			let output = output?;
 			if !output.status.success() {
 				let stderr = String::from_utf8_lossy(&output.stderr);
 				if stderr.contains("does not exist") {
