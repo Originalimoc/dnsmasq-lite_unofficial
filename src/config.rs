@@ -120,7 +120,7 @@ impl Config {
 						
 						for domain in domains {
 							for ip in &ips {
-								config.full_match_host_records.insert(domain, ip);
+								config.full_match_host_records.insert(&domain.to_ascii_lowercase(), ip);
 							}
 						}
 					}
@@ -179,8 +179,8 @@ impl Config {
 		let v4_unspecified = std::net::IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0));
 		let v6_unspecified = std::net::IpAddr::V6(std::net::Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0));
 		match qtype {
-			simple_dns::resolver::Rtype::A => { self.full_match_host_records.insert(domain_name, &Hosts::new(v4_unspecified)) },
-			simple_dns::resolver::Rtype::AAAA => { self.full_match_host_records.insert(domain_name, &Hosts::new(v6_unspecified)) },
+			simple_dns::resolver::Rtype::A => { self.full_match_host_records.insert(&domain_name.to_ascii_lowercase(), &Hosts::new(v4_unspecified)) },
+			simple_dns::resolver::Rtype::AAAA => { self.full_match_host_records.insert(&domain_name.to_ascii_lowercase(), &Hosts::new(v6_unspecified)) },
 			_ => {}
 		}
 	}	
@@ -202,7 +202,7 @@ impl Config {
             if parts.len() == 2 {
                 let ip: IpAddr = parts[0].parse().expect("Invalid IP address");
                 let domain = parts[1];
-                full_hosts_trie.insert(domain, &Hosts::new(ip));
+                full_hosts_trie.insert(&domain.to_ascii_lowercase(), &Hosts::new(ip));
             }
         }
 
@@ -218,12 +218,12 @@ impl Config {
         let ip_str = parts.last().unwrap();
         if *ip_str == "#" {
 			for domain in domains {
-				partial_hosts_trie.insert(domain, &Hosts::new("0.0.0.0".parse()?));
-				partial_hosts_trie.insert(domain, &Hosts::new("::".parse()?));
+				partial_hosts_trie.insert(&domain.to_ascii_lowercase(), &Hosts::new("0.0.0.0".parse()?));
+				partial_hosts_trie.insert(&domain.to_ascii_lowercase(), &Hosts::new("::".parse()?));
 			}
         } else {
             for domain in domains {
-				partial_hosts_trie.insert(domain, &Hosts::new(ip_str.parse()?));
+				partial_hosts_trie.insert(&domain.to_ascii_lowercase(), &Hosts::new(ip_str.parse()?));
 			}
         };
         
@@ -266,13 +266,13 @@ impl Config {
 						Self::parse_address_directive(&format!("address=/{}/::", domain), partial_hosts_trie)
 							.map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
 					} else {
-						server_trie.insert(domain, &Server::new("0.0.0.0:0".parse().unwrap()));
+						server_trie.insert(&domain.to_ascii_lowercase(), &Server::new("0.0.0.0:0".parse().unwrap()));
 					}
 				}
 			} else {
 				let ip_port = Self::prepare_and_parse_server_string(server_str)?;
 				for domain in domains {
-					server_trie.insert(domain, &ip_port);
+					server_trie.insert(&domain.to_ascii_lowercase(), &ip_port);
 				}
 			}
 		}
@@ -316,7 +316,7 @@ impl Config {
 		// Insert each domain with its corresponding IP set names
 		for domain in domains {
 			for ipset_name in ipset_names_str.split(',') {
-				ipset_trie.insert(domain, &Ipset::new(ipset_name));
+				ipset_trie.insert(&domain.to_ascii_lowercase(), &Ipset::new(ipset_name));
 			}
 		}
 		Ok(())
